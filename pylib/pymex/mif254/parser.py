@@ -8,13 +8,18 @@ Created on Mon Jun 29 13:56:57 2020
 
 # -*- coding: utf-8 -*-
 from lxml import etree
-from abc import ABC
-import sys
+import json
 
 NAMESPACES = {"x":"http://psi.hupo.org/mi/mif"}
 LEN_NAMESPACE = len(NAMESPACES["x"])+2 #because of the two brackets around the text
 
-def genericSearch(root):
+def attribToDict(attrib): #Converts an ElementTree attrib object to a python dictionary.
+    pyDict = {}
+    for item in attrib:
+        pyDict[item] = attrib.get(item)
+    return pyDict
+
+def genericSearch(root): #Recursive search through element tree
     data = {}
     #print(root)
     for item in root:
@@ -23,7 +28,8 @@ def genericSearch(root):
             data[item.tag[LEN_NAMESPACE:]] = item.text
             #print('a')
         elif item.attrib and len(item)==0:
-            data[item.tag[LEN_NAMESPACE:]] = item.attrib
+            data[item.tag[LEN_NAMESPACE:]] = {}
+            data[item.tag[LEN_NAMESPACE:]]["elementAttrib"]=attribToDict(item.attrib)
             #print('b')
         elif item.tag[LEN_NAMESPACE:] == "names":
             names = Names()
@@ -39,11 +45,13 @@ def genericSearch(root):
             #print('e')
         else:
             data[item.tag[LEN_NAMESPACE:]] = genericSearch(item)
+            data[item.tag[LEN_NAMESPACE:]]["elementAttrib"]=attribToDict(item.attrib)
             #print('f')
+        
         
     return data
 
-class Mif254Record:
+class Mif254Record: #Stores mif files as python dictionary of dictionaries.
     # something else
     def __init__(self):
         self.data=[]
@@ -59,7 +67,7 @@ class Mif254Record:
                 self.data.append(entryElem)
             
 
-class Mif254Parser:
+class Mif254Parser: #Parses a mif file associated with a filename. Saves to Mif254Record object.
     def __init__(self,debug=False):
         self.debug = debug
                     
@@ -141,5 +149,3 @@ class AttributeList():
         
 
      
-
-

@@ -8,8 +8,31 @@ Created on Mon Jun 29 13:56:57 2020
 # -*- coding: utf-8 -*-
 from lxml import etree
 import json
+from xml.dom import minidom
 
-from mif254.utils import *
+#-------------------------------- GLOBALS -------------------------------------------------------------
+NAMESPACES = {"x":"http://psi.hupo.org/mi/mif"}
+LEN_NAMESPACE = len(NAMESPACES["x"])+2 #because of the two brackets around the text 
+LISTED_ELEMENTS = ["hostOrganismList","experimentalRoleList","experimentalPreparationList","featureList","featureRangeList","attributeList"] #we no longer have a need for identified listed elements.
+#-------------------------------- UTILITIES --------------------------------------------------
+def modifyTag(item): 
+    """ Modifies tag of an item if necessary."""
+    tag = item.tag[LEN_NAMESPACE:]
+    return tag
+    
+def isCvTerm(dom):
+    """ Determines whether or not a given ElementTree element is a CvTerm."""
+
+    elemList = list(dom)
+    return (len(elemList) == 2 and elemList[0].tag[LEN_NAMESPACE:] == "names" and elemList[1].tag[LEN_NAMESPACE:] == "xref")
+
+def attribToDict( attrib ):
+    """Converts an ElementTree attrib object to a python dictionary."""
+
+    pyDict = {}
+    for item in attrib:
+        pyDict[item] = attrib.get(item)
+    return pyDict
 
 def genericSearch( entry, item ):
     """Recursive search through element tree."""
@@ -24,22 +47,22 @@ def genericSearch( entry, item ):
      
     elif tag == "names":
         names = Names( entry )
-        return names.parseDom( item )
+        return names.build( item )
         #print(tag,'c')
     elif tag == "xref":
         xref = Xref( entry )
-        return xref.parseDom( item )
+        return xref.build( item )
         #print(tag,'d')
-    elif tag == "attributeList":
-        #attributeList = AttributeList( entry )
-        return Attribute(entry).parseDom( item )
     
     elif tag in LISTED_ELEMENTS:
-        return ListedElement(entry).parseDom(item)
+        if tag=="attributeList":
+            return Attribute(entry).build( item )
+        else:
+            return ListedElement(entry).build(item)
     
     elif isCvTerm(item):
         cvterm = CvTerm(entry)
-        return cvterm.parseDom( item )
+        return cvterm.build( item )
     
     else:
         data={}
@@ -53,6 +76,123 @@ def genericSearch( entry, item ):
         #print(tag,'f')
     
         return data
+    
+    
+#------------------------------TO MIF GLOBALS-------------------------------------------------------
+
+NAMESPACES_TOMIF = {None:"http://psi.hupo.org/mi/mif","xsi":"http://www.w3.org/2001/XMLSchema-instance"} #Xpath does not support empty namespace key, but when converting back to DOM this is fine.
+MIF_NS = NAMESPACES["x"]
+MIF = "{%s}" % MIF_NS
+       
+#----------------------------TO MIF UTILITIES-------------------------------------------------
+
+def isTextElement(text):
+        return (isinstance(text,str) or (isinstance(text,dict) and "value" in text.items()))
+    
+def buildTextElement(name,text): #specifically 
+    root = etree.Element(MIF+name)
+    if(isinstance(text,dict)):
+        for textkey, textval in text.items():
+            if(textkey=="value"):
+                root.text = textval
+            else:
+                root.attrib[textkey] = textval   
+                    
+    elif(isinstance(text,str)):
+        root.text=text
+        
+    return root
+                
+def parseChildren(root, item): #when recursively parsing through these objects, we have to look at children because their contents may have to be added back to the root
+    for subkey, subval in item.items():
+        if(subkey=="elementAttrib"):
+            for attribkey, attribval in subval.items():
+                root.attrib[attribkey] = attribval
+            
+        elif(isTextElement(subval)):
+            root.append(buildTextElement(subkey,subval))
+                
+        else:
+            #print(subkey)
+            root.append(genericMifGenerator(subkey,subval))     
+    
+def genericMifGenerator(rawkey,value): #root is a value in key value pair 
+    
+    if not MIF in rawkey: #add the namespace
+        key = MIF+rawkey
+    else:
+        key = rawkey
+        
+    root = etree.Element(key)
+    if(isinstance(value,tuple)):
+        val = value[1]
+    else:
+        val = value.copy()
+        
+    if((rawkey=="experimentList" or rawkey=="interactorList" or rawkey=="availabilityList") and isinstance(val,dict)):
+
+        for expkey, expval in val.items():
+            if rawkey=="experimentList":
+                childName = "experimentDescription"
+            else:
+                childName = key[:-4]
+            childExp = genericMifGenerator(childName,expval)
+            childExp.attrib["id"] = expkey
+            root.append(childExp)
+    
+    elif(rawkey=="participantList"):
+        
+        for participant in val:
+            partElem = etree.Element("participant")
+            for partkey, partval in participant.items():
+                if(partkey=="participantInteractorList"):
+                    for expkey, expval in partval.items():
+                        childName = "interactor"
+                        childExp = genericMifGenerator(childName,expval)
+                        childExp.attrib["id"] = expkey
+                        partElem.append(childExp)
+                else:
+                    partElem.append(genericMifGenerator(partkey,partval))
+            root.append(partElem)
+            
+    elif (rawkey=="attributeList"):
+        for item in val:
+            root.append(buildTextElement("attribute",item))        
+            
+    elif(rawkey=="names"): #names is a special case 
+        for namekey,nameval in val.items(): 
+            if(isinstance(nameval,str)):
+                root.append(buildTextElement(namekey,nameval))
+            else: #nameval is a list of aliases
+                for alias in nameval:
+                    root.append(buildTextElement(namekey,alias))
+                    
+    elif(rawkey=="xref"):
+        for xkey, xval in val.items():
+            if(xkey=="secRefInd"):
+                continue    
+            elif(isinstance(xval,dict)): #primaryRef
+                root.append(buildTextElement(xkey,xval))
+            else: #secondaryRef
+                for secref in xval:
+                    root.append(buildTextElement(xkey,secref))    
+                    
+    elif(isinstance(val,dict)):
+        parseChildren(root,val)
+             
+    elif(isinstance(val,list)):
+        for item in val:
+                
+            if key.endswith("List"):
+                modifiedKey = key[:-4]
+                childElem = etree.Element(modifiedKey)
+            else:
+                childElem = etree.Element(key)
+            root.append(childElem)
+            parseChildren(childElem,item)
+            
+    
+    return root      
 
 #------------------------------ CLASSES ------------------------------------------------------
     
@@ -66,48 +206,26 @@ class Mif254Parser():
     def parse( self, filename ):
         "foo"
         mif = Mif254Record()
-        mif.parseDom( filename )
+        mif.build( filename )
         return mif
 
 class Mif254Record():
     """Mif record representation."""
 
     def __init__(self):
-        self.root = []
-
-    @property
-    def entry(self):
-        return self.getEntry()
+        self.root = {"entries":[]}
     
-    def getEntry(self, id = 0):
-        if len(self.root) > id:
-            return Entry(self.root, id)
-        else:
-            return None
-    
-    @property          
-    def interaction(self):
-        
-        ret = []
-        
-        for i in Entry( self.root ).interaction:
-            ret.append( self.getEntry().getInteraction(id) )
-        
-        #return Entry(self.root).interaction
-        return ret
-        
-    def __getitem__(self, id):
-        return self.getEntry().getInteraction(id)    
-        
-    def parseDom( self, filename ):
+    def build( self, filename ):
         
         record = etree.parse( filename )
+        entrySet = record.xpath("/x:entrySet",namespaces=NAMESPACES)
+        self.root["elementAttrib"] = attribToDict(entrySet[0].attrib)
         entries = record.xpath( "/x:entrySet/x:entry", namespaces=NAMESPACES )
         for entry in entries:
             entryElem = Entry( self.root )
-            self.root.append( entryElem.parseDom( entry ) )
+            self.root["entries"].append( entryElem.build( entry ) )
 
-    def parseJson(self, file ):
+    def fromJson(self, file ):
         self.root = json.load( file )
         return self
 
@@ -115,91 +233,57 @@ class Mif254Record():
         return json.dumps(self.root, indent=2)
 
     def toMif254( self ):
-
-        rootDom = etree.Element(MIF + "entrySet", nsmap=NSMAP)
-        # required attributes:
-        # level="2" version="5" minorVersion="4"
- 
-        rootDom.set( "level","2")
-        rootDom.set( "version","5")
-        rootDom.set( "minorVersion","4")
+        root = etree.Element("entrySet",nsmap=NAMESPACES_TOMIF)
+        for attribkey,attribval in record.root["elementAttrib"].items():
+            root.attrib[attribkey] = attribval
+        for entry in record.root["entries"]:
+            entryElem = etree.Element("entry")
+            for key, val in entry.items():
+                entryElem.append(genericMifGenerator(key,val))
+            root.append(entryElem)    
+                    
+        return root
     
-        for entry in self.root:
-            entryDom = etree.SubElement( rootDom, MIF + "entry" )            
-            Entry( self.root ).toMif254( entryDom, entry, 1 ) 
-            
-        return etree.tostring( rootDom, pretty_print=True )
-        
     
 class Entry():
     
-    def __init__( self, root, id = 0 ):
+    def __init__( self, root ):
         self.data = {}
         self.root = root
-        self.id = 0
-
-    def __getitem__( self, id ):
-        return self.getInteraction( id )
-
-    @property
-    def interaction(self):        
-        return self.root[self.id]["interaction"] 
-
-    def getInteraction( self, id, eid=None ):
-        if eid is not None:
-            return Interaction(self.root[eid],id)
-        else:       
-            return Interaction(self.root[self.id],id)
         
-    def toMif254( self, parent, entry, curid ):
-        if "source" in entry:
-            sourceDom = etree.SubElement( parent, MIF + "source" )
-            curid = Source( self.root ).toMif254( sourceDom, entry["source"], curid )
-            
-        # interaction list only (this enforces expanded version) 
-        if "interaction" in entry and len(entry["interaction"]) > 0:
-            intnListDom = etree.SubElement( parent, MIF + "interactionList" )
-
-            for intn in entry["interaction"]:
-                intnDom = etree.SubElement( intnListDom, MIF + "interaction" )
-                
-                intnDom.set("id", str(curid))
-                curid += 1
-                curid = Interaction( self.root ).toMif254( sourceDom, intn,curid )
-        
-    def parseDom( self, dom ):
+    def build( self, dom ):
 
         for item in dom:
             tag = item.tag[LEN_NAMESPACE:]            
             if tag == 'source':
-                self.data["source"] = Source( self.data ).parseDom( item )
+                self.data["source"] = Source( self.data ).build( item )
                 
             elif tag == 'experimentList':
-                self.data["experiment"] = {}
+                self.data[tag] = {}
                 expElem = item.xpath( "x:experimentDescription", namespaces=NAMESPACES )            
                 for exp in expElem:                    
-                    (cId, cExp) =  Experiment( self.data ).parseDom( exp )                    
-                    self.data["experiment"][cId] = cExp
+                    (cId, cExp) =  Experiment( self.data ).build( exp )                    
+                    self.data["experimentList"][cId] = cExp
                 
             elif tag == 'interactorList':
-                self.data["interactor"] = {}
+                self.data[tag] = {}
                 intrElem = item.xpath( "x:interactor", namespaces=NAMESPACES )
                 for intr in intrElem:
-                    (cId, cInt) =  Interactor( self.data ).parseDom( intr )
-                    self.data["interactor"][cId] = cInt 
+                    (cId, cInt) =  Interactor( self.data ).build( intr )
+                    self.data["interactorList"][cId] = cInt 
 
             elif tag == 'interactionList':
-               self.data["interaction"] = []
+               self.data[tag] = []
                intnElem = item.xpath( "x:interaction", namespaces=NAMESPACES )
                for intn in intnElem:
-                   (cId, cIntn) =  Interaction( self.data ).parseDom( intn )
-                   self.data["interaction"].append( cIntn )
+                   (cId, cIntn) =  Interaction( self.data ).build( intn )
+                   self.data["interactionList"].append( cIntn )
             elif tag == 'availabilityList':
-                self.data["availability"] = {}
+                self.data[tag] = {}
                 avlbElem = item.xpath( "x:availability", namespaces=NAMESPACES )
                 for avlb in avlbElem:
-                    (cId, cAvlb) =  Availability( self.data ).parseDom(  avlb  )
-                    self.data["availability"][cId] = cAvlb
+                    (cId, cAvlb) =  Availability( self.data ).build(  avlb  )
+                    self.data["availabilityList"][cId] = cAvlb
         
         return self.data
 
@@ -209,7 +293,7 @@ class Source():
         self.data={}
         self.entry = entry
 
-    def parseDom( self, dom ):
+    def build( self, dom ):
         if(isinstance( dom, str)):
             record = etree.parse( dom )
             dom = record.xpath( "/x:entrySet/x:entry/x:source",
@@ -219,19 +303,16 @@ class Source():
             tag = modifyTag(item)
             self.data[tag] = genericSearch( self.entry, item )
             
-        #element without id attribute: return data
+        self.data["elementAttrib"]=attribToDict(dom.attrib) #sources have attributes
+        
         return self.data
 
-    def toMif254( self, parent, source, curid ):
-        # build source content here
-        return curid
-    
 class Experiment():
     def __init__( self, entry ):
         self.data = {}
         self.entry = entry
         
-    def parseDom( self, dom ):
+    def build( self, dom ):
 
         if(isinstance(dom, str)):
             record = etree.parse( dom )
@@ -252,7 +333,7 @@ class Interactor():
         self.data={}
         self.entry = entry
 
-    def parseDom( self, dom ):
+    def build( self, dom ):
 
         if(isinstance(dom, str)):
             record = etree.parse(dom)
@@ -269,30 +350,10 @@ class Interactor():
         return ( id[0], self.data )
 
 class Interaction():
-    def __init__( self, entry, id=0 ):
+    def __init__( self, entry ):
         self.data={}
         self.entry = entry
-        self.id = id
-
-    @property
-    def participant(self):
-        return self.entry["interaction"][self.id]["participant"]
-
-    @property
-    def itype(self):
-        return self.entry["interaction"][self.id]["interactionType"]
-
-    @property
-    def source(self):
-        return self.entry["source"]
-
-
-    def toMif254( self, parent, source, curid ):
-        # build interaction content here
-        return curid
-
-        
-    def parseDom( self, dom ):
+    def build( self, dom ):
         
         if(isinstance(dom, str)):
             record = etree.parse(dom)
@@ -306,15 +367,15 @@ class Interaction():
 
             if tag == "experimentList":
 
-                idata["experiment"] = []
+                idata[tag] = []
 
                 # expanded form: <experimentDescription>...</experimentDescription>
                 
                 expElem = item.xpath( "x:experimentDescription", namespaces=NAMESPACES )
                 for exp in expElem:
                     
-                    (cId, cExp) =  Experiment( self.entry ).parseDom( exp )
-                    idata["experiment"].append( cExp )
+                    (cId, cExp) =  Experiment( self.entry ).build( exp )
+                    idata[tag].append( cExp )
 
                 #  compact form: <experimentRef>...</experimentRef>
                     
@@ -322,43 +383,43 @@ class Interaction():
 
                 for ref in refElem:       
 
-                    idata["experiment"].append( self.entry["experiment"][ref] ) 
+                    idata[tag].append( self.entry["experimentList"][ref] ) 
 
             elif tag == "participantList":
-                idata["participant"] = []
+                idata[tag] = []
                 prtElem = item.xpath( "x:participant", namespaces=NAMESPACES )
                 for prt in prtElem: 
-                    (cId, cPrt) =  Participant( self.entry ).parseDom( prt )
-                    idata["participant"].append( cPrt )
+                    (cId, cPrt) =  Participant( self.entry ).build( prt )
+                    idata[tag].append( cPrt )
                 
             elif tag in ["modelled","intraMolecular","negative"]:
                 idata[tag] = "bool"
                 
             elif tag =="confidenceList":
-                idata["confidence"] = "conf"  #skip fo rnow
+                idata[tag] = "conf"  #skip fo rnow
                 
             elif tag =="parameterList":
-                idata["parameter"] = "param"  #skip for now
+                idata[tag] = "param"  #skip for now
             
             else:
                 tag = modifyTag(item)
                 idata[tag] = genericSearch(self.entry, item)
         # idata should look like
         #{
-        # "xref": {whatever Xref.parseDom() returns}
-        # "names":{whatever Names.parseDom() returns}
-        # "availability": {whatever Availability.parseDom() returns
+        # "xref": {whatever Xref.build() returns}
+        # "names":{whatever Names.build() returns}
+        # "availability": {whatever Availability.build() returns
         #                  or the value corresponding to availabilityRef
         #                  taken from entry["availability"] 
         #                 },
         # "experiment": [{..},{..},{..}], the values correspond to the data        
         #                                 field returned by 
-        #                                 Experiment().parseDom() or to 
+        #                                 Experiment().build() or to 
         #                                 entry["experiment"] value 
         #                                 corresponding to experimentRef
         # "participant":[{..},{..},{..}], the values correspond to the data
         # ...                             field returned by 
-        #}                                Participant().parseDom() 
+        #}                                Participant().build() 
                 
         #element with id attribute: return (id,data) tuple                    
         return ( id[0], idata )
@@ -369,29 +430,28 @@ class Participant():
         self.data = {}
         self.entry = entry
         
-    def parseDom( self, dom ):
-        # parseDom participant here 
+    def build( self, dom ):
+        # build participant here 
         pdata = {}
         id = dom.xpath("./@id", namespaces=NAMESPACES )
         for item in dom:
             tag = item.tag[LEN_NAMESPACE:]
             
             if tag == "interactorRef":
-                pdata["interactor"] = []
+                pdata["participantInteractorList"] = {}
                 refElem= item.xpath("text()")
                 for ref in refElem:
-
-                    pdata["interactor"].append(self.entry["interactor"][ref])
+                    pdata["participantInteractorList"][ref] = self.entry["interactorList"][ref]
             else:
                 tag = modifyTag(item)
                 pdata[tag] = genericSearch(self.entry,item)
         # data should look like
         #{
-        # "names":{whatever Names.parseDom() returns}
-        # "xref": {whatever Xref.parseDom() returns}
+        # "names":{whatever Names.build() returns}
+        # "xref": {whatever Xref.build() returns}
         # "interactor":{..}, the value corresponds        
         #                    to the data field returned by 
-        #                    Interactor().parseDom() or to 
+        #                    Interactor().build() or to 
         #                    entry["interactor"] value 
         #                    corresponding
         #  "interactionRef":{ interactionRef text },
@@ -406,7 +466,7 @@ class Participant():
         #  "parameter": [{..}],    ignore for now
         #  "attribute": [{..},{..}], the values correspond
         #                            to the values returned
-        #                            by Attribute().parseDom()
+        #                            by Attribute().build()
         #element with id attribute: return (id,data) tuple    
         return (id[0], pdata )
     
@@ -414,7 +474,7 @@ class Names():
     def __init__(self, entry ):
         self.entry = entry
         
-    def parseDom( self, dom ):        
+    def build( self, dom ):        
         ndata = {}
         for item in dom:
             tag = item.tag[LEN_NAMESPACE:]
@@ -439,7 +499,7 @@ class Xref():
         #self.data={}
         self.entry =entry
         
-    def parseDom( self, dom ):
+    def build( self, dom ):
         #dom = dom.xpath(".",namespaces=NAMESPACES)[0]
         #self.data = genericSearch( self.entry, dom)
         xdata = {}
@@ -498,7 +558,7 @@ class Attribute():
         #self.data = []
         self.entry = entry
         
-    def parseDom( self, dom ):
+    def build( self, dom ):
         attribdata = []
         attrDom = dom.xpath("x:attribute",namespaces=NAMESPACES)
         for attr in attrDom: 
@@ -518,7 +578,7 @@ class Availability():
     def __init__( self, entry ):
         self.entry = entry
         
-    def parseDom( self, dom ):
+    def build( self, dom ):
         
         id = dom.attrib.get("id")
         availdata = {"value":dom.text}
@@ -535,20 +595,20 @@ class CvTerm():
     def __init__(self, entry):
         self.entry = entry
         
-    def parseDom( self, dom ):
+    def build( self, dom ):
         cvdata = {}
         for item in dom:
             tag = item.tag[LEN_NAMESPACE:]
             if tag == "names":                          
-                cvdata["names"] = Names(self.entry).parseDom( item )    
+                cvdata["names"] = Names(self.entry).build( item )    
 
             elif tag == "xref":                           
-                cvdata["xref"] = Xref(self.entry).parseDom( item )
+                cvdata["xref"] = Xref(self.entry).build( item )
                 
         # should return 
         #{
-        #  "names": { whatever Names.parseDom() returns } 
-        #  "xref": { whatever Xref.parseDom() returns}
+        #  "names": { whatever Names.build() returns } 
+        #  "xref": { whatever Xref.build() returns}
         #}
                 
         return cvdata
@@ -557,11 +617,13 @@ class ListedElement():
     def __init__(self,entry):
         self.entry = entry
     
-    def parseDom( self, dom ):
+    def build( self, dom ):
         eldata = []
         for item in dom:
             eldata.append(genericSearch(self.entry,item))
             
         return eldata
+
+
 
     
